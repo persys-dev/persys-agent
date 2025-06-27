@@ -1,0 +1,89 @@
+# Stage 1: Build PersysAgent
+FROM ubuntu:22.04 AS builder
+
+# Install build tools and dynamic dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    pkg-config \
+    libssl-dev \
+    libcurl4-openssl-dev \
+    uuid-dev \
+    autoconf \
+    automake \
+    libtool \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build static jsoncpp 1.9.5
+RUN git clone --depth 1 --branch 1.9.5 https://github.com/open-source-parsers/jsoncpp.git /tmp/jsoncpp \
+    && cd /tmp/jsoncpp \
+    && mkdir build && cd build \
+    && cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_INSTALL_PREFIX=/usr .. \
+    && make -j$(nproc) \
+    && make install \
+    && ls -l /usr/lib/*/libjsoncpp.a \
+    && rm -rf /tmp/jsoncpp
+
+# Install standalone Asio
+RUN git clone --depth 1 --branch asio-1-30-2 https://github.com/chriskohlhoff/asio.git /tmp/asio \
+    && mkdir -p /usr/include \
+    && cp -r /tmp/asio/asio/include/asio /usr/include/ \
+    && cp /tmp/asio/asio/include/asio.hpp /usr/include/ \
+    && ls -l /usr/include/asio.hpp \
+    && rm -rf /tmp/asio
+
+# Install Crow framework
+RUN git clone --depth 1 --branch v1.2 https://github.com/CrowCpp/Crow.git /tmp/crow \
+    && cd /tmp/crow \
+    && mkdir build && cd build \
+    && cmake .. -DCROW_BUILD_EXAMPLES=OFF -DCROW_BUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX=/usr \
+    && make -j$(nproc) \
+    && make install \
+    && ls -l /usr/include/crow.h \
+    && rm -rf /tmp/crow
+
+# Set working directory
+WORKDIR /app
+
+# Copy source files
+COPY src/ ./src/
+COPY CMakeLists.txt .
+
+# Build PersysAgent with dynamic linking
+RUN mkdir build && cd build \
+    && cmake -DCMAKE_BUILD_TYPE=Release .. \
+    && make -j$(nproc) \
+    && strip --strip-unneeded PersysAgent \
+    && ldd PersysAgent
+
+# Stage 2: Runtime image
+FROM ubuntu:22.04
+
+# Install runtime dependencies (shared libraries)
+RUN apt-get update && apt-get install -y \
+    docker.io \
+    ca-certificates \
+    libcurl4 \
+    libssl3 \
+    uuid \
+    libstdc++6 \
+    libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# # Install docker-compose (static binary)
+# RUN curl -L https://github.com/docker/compose/releases/download/v2.29.0/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose \
+#     && chmod +x /usr/local/bin/docker-compose
+
+# Copy compiled binary from builder
+COPY --from=builder /app/build/PersysAgent /usr/local/bin/PersysAgent
+
+# Set working directory
+WORKDIR /app
+
+# Expose port for API
+EXPOSE 8080
+
+# Command to run the agent
+CMD ["/usr/local/bin/PersysAgent"]

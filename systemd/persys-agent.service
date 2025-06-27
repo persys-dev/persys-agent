@@ -1,0 +1,14 @@
+[Unit]
+Description=Persys Agent Service
+After=network.target docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/persys-agent
+Restart=on-failure
+RestartSec=5
+User=persys
+EnvironmentFile=/etc/persys-agent.env
+
+[Install]
+WantedBy=multi-user.target
