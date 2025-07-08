@@ -27,9 +27,11 @@ std::string DockerController::startContainer(const std::string &image,
                                              const std::vector<std::string> &ports, 
                                              const std::vector<std::string> &envVars, 
                                              const std::vector<std::string> &volumes, 
+                                             const std::vector<std::string> &labels,
                                              const std::string &network, 
                                              const std::string &restartPolicy, 
-                                             bool detach) {
+                                             bool detach,
+                                             const std::string &command) {
     std::ostringstream cmd;
     cmd << "run ";
 
@@ -50,7 +52,14 @@ std::string DockerController::startContainer(const std::string &image,
         cmd << "-v " << volume << " ";
     }
 
-    cmd << image;
+    for (const auto &label : labels) {
+        cmd << "--label " << label << " ";
+    }
+
+    cmd << image << " ";
+    if (!command.empty()) {
+        cmd << command;
+    }
     printf("Docker Command: %s", cmd.str().c_str());
     return executeDockerCommand(cmd.str());
 }
@@ -275,3 +284,4 @@ Json::Value DockerController::getDockerInfo() {
     }
     return info;
 }
+

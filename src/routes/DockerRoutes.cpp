@@ -1,34 +1,11 @@
 #include "DockerRoutes.h"
 #include <json/json.h>
 #include <sstream>
+#include <thread>
 
 namespace persys {
 
 void initializeDockerRoutes(crow::App<persys::SignatureMiddleware>& app, DockerController& dockerController) {
-    CROW_ROUTE(app, "/api/v1/execute").methods("POST"_method)([&dockerController](const crow::request& req) {
-        Json::Value payload;
-        Json::CharReaderBuilder builder;
-        std::string errs;
-        std::istringstream s(req.body);
-        if (!Json::parseFromStream(builder, s, &payload, &errs)) {
-            return crow::response(400, "{\"error\": \"Invalid JSON payload\"}");
-        }
-
-        std::string command = payload["command"].asString();
-        std::string image = payload["image"].asString();
-
-        std::cout << "Executing command: " << command << ", image: " << image << std::endl;
-        std::vector<std::string> ports, envVars, volumes;
-        std::string result = dockerController.startContainer(
-            image, "", ports, envVars, volumes, "", "no-restart", true
-        );
-
-        Json::Value response;
-        response["message"] = "Command executed";
-        response["result"] = result;
-        Json::StreamWriterBuilder writer;
-        return crow::response(200, Json::writeString(writer, response));
-    });
 
     CROW_ROUTE(app, "/docker/run").methods("POST"_method)([&dockerController](const crow::request &req) {
         Json::CharReaderBuilder builder;
@@ -41,8 +18,10 @@ void initializeDockerRoutes(crow::App<persys::SignatureMiddleware>& app, DockerC
             return crow::response(400, response);
         }
 
+        std::string workloadId = jsonPayload["workloadId"].asString();
         std::string image = jsonPayload["image"].asString();
-        std::string name = jsonPayload["name"].asString();
+        std::string name = jsonPayload["name"].asString(); // This is now the workload ID
+        std::string displayName = jsonPayload["displayName"].asString(); // Original name for display
         std::string command = jsonPayload["command"].asString();
         std::vector<std::string> ports;
         for (const auto &port : jsonPayload["ports"]) {
@@ -61,8 +40,10 @@ void initializeDockerRoutes(crow::App<persys::SignatureMiddleware>& app, DockerC
         std::string network = jsonPayload["network"].asString();
         std::string restartPolicy = jsonPayload["restartPolicy"].asString();
         bool detach = jsonPayload["detach"].asBool();
+        bool async = jsonPayload["async"].asBool();
 
         std::cout << "Docker Command: run -d --name " << name 
+                  << " --label displayName=" << displayName
                   << " --restart=" << restartPolicy;
         for (const auto& port : ports) {
             std::cout << " -p " << port;
@@ -81,9 +62,25 @@ void initializeDockerRoutes(crow::App<persys::SignatureMiddleware>& app, DockerC
         }
         std::cout << " " << image << std::endl;
 
-        std::string result = dockerController.startContainer(image, name, ports, envVars, volumes, network, restartPolicy, detach);
+        // Prepare labels
+        std::vector<std::string> labels;
+        labels.push_back("displayName=" + displayName);
+        labels.push_back("workloadId=" + workloadId);
+
+        // Execute the Docker command (always async now, but return immediately)
+        std::thread([&dockerController, image, name, ports, envVars, volumes, labels, network, restartPolicy, detach, command]() {
+            try {
+                std::string result = dockerController.startContainer(image, name, ports, envVars, volumes, labels, network, restartPolicy, detach, command);
+                std::cout << "Container execution result for " << name << ": " << result << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "Exception during container execution for " << name << ": " << e.what() << std::endl;
+            }
+        }).detach();
+
+        // Return immediately
         crow::json::wvalue response;
-        response["result"] = result;
+        response["result"] = "Command queued for execution";
+        response["workloadId"] = workloadId;
         return crow::response(200, response);
     });
 
