@@ -365,6 +365,69 @@ Json::Value NodeController::getDockerSwarmInfo() const {
     return swarm;
 }
 
+std::string NodeController::extractHostname(const std::string& url) const {
+    // Simple URL parsing to extract hostname
+    // Handle both http:// and https:// URLs
+    std::string hostname = url;
+    
+    // Remove protocol
+    size_t protocolPos = hostname.find("://");
+    if (protocolPos != std::string::npos) {
+        hostname = hostname.substr(protocolPos + 3);
+    }
+    
+    // Remove path (everything after first slash)
+    size_t pathPos = hostname.find('/');
+    if (pathPos != std::string::npos) {
+        hostname = hostname.substr(0, pathPos);
+    }
+    
+    // Remove port if present
+    size_t portPos = hostname.find(':');
+    if (portPos != std::string::npos) {
+        hostname = hostname.substr(0, portPos);
+    }
+    
+    return hostname;
+}
+
+bool NodeController::isIpAddress(const std::string& hostname) const {
+    // Check if the hostname is an IP address (IPv4 or IPv6)
+    
+    // IPv4 pattern: x.x.x.x where x is 0-255
+    std::string ipv4Pattern = R"((\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}))";
+    
+    // Simple IPv4 validation
+    std::istringstream iss(hostname);
+    std::string octet;
+    int octetCount = 0;
+    
+    while (std::getline(iss, octet, '.')) {
+        if (octetCount >= 4) return false; // Too many octets
+        
+        try {
+            int value = std::stoi(octet);
+            if (value < 0 || value > 255) return false; // Invalid octet range
+        } catch (const std::exception&) {
+            return false; // Not a number
+        }
+        
+        octetCount++;
+    }
+    
+    // Must have exactly 4 octets for IPv4
+    if (octetCount != 4) return false;
+    
+    // Check if it's not all digits (which would indicate it's a hostname)
+    for (char c : hostname) {
+        if (c != '.' && !std::isdigit(c)) {
+            return false; // Contains non-numeric characters, likely a hostname
+        }
+    }
+    
+    return true; // Looks like an IPv4 address
+}
+
 void NodeController::registerNode() {
     Json::Value resources = sysCtrl_.getSystemResources();
     Json::Value hypervisor = getHypervisorInfo();
@@ -424,14 +487,82 @@ void NodeController::registerNode() {
     std::string jsonPayload = Json::writeString(writer, nodeData);
 
     std::string url = centralUrl_ + "/nodes/register";
+    
+    // Log the URL being called
+    std::cerr << "Attempting to register node with central service at: " << url << std::endl;
+    
+    // First, test DNS resolution (skip if IP address)
+    std::string hostname = extractHostname(url);
+    
+    if (!isIpAddress(hostname)) {
+        std::string dnsTestCmd = "nslookup " + hostname + " >/dev/null 2>&1";
+        int dnsResult = std::system(dnsTestCmd.c_str());
+        
+        if (dnsResult != 0) {
+            std::string errorMsg = "DNS resolution failed for hostname: " + hostname;
+            std::cerr << "ERROR: " << errorMsg << std::endl;
+            isReady_ = false;
+            throw std::runtime_error(errorMsg);
+        }
+    } else {
+        std::cerr << "Skipping DNS resolution for IP address: " << hostname << std::endl;
+    }
+    
+    // Test if the server is reachable (basic connectivity)
+    std::string connectivityTestCmd = "curl -s --connect-timeout 5 --max-time 10 " + url + " >/dev/null 2>&1";
+    int connectivityResult = std::system(connectivityTestCmd.c_str());
+    
+    if (connectivityResult != 0) {
+        std::string errorMsg = "Server not reachable or timeout: " + url;
+        std::cerr << "ERROR: " << errorMsg << std::endl;
+        isReady_ = false;
+        throw std::runtime_error(errorMsg);
+    }
+    
+    // Attempt the actual registration with detailed error capture
     std::string command = "curl -X POST -H \"Content-Type: application/json\" -d '"
-                         + jsonPayload + "' " + url + " 2>/dev/null";
-    int result = std::system(command.c_str());
-    if (result == 0) {
+                         + jsonPayload + "' " + url + " -w \"HTTP_CODE:%{http_code}\" -s";
+    
+    FILE* pipe = popen(command.c_str(), "r");
+    if (!pipe) {
+        std::string errorMsg = "Failed to execute curl command for URL: " + url;
+        std::cerr << "ERROR: " << errorMsg << std::endl;
+        isReady_ = false;
+        throw std::runtime_error(errorMsg);
+    }
+    
+    char buffer[128];
+    std::string result = "";
+    while (!feof(pipe)) {
+        if (fgets(buffer, 128, pipe) != NULL) {
+            result += buffer;
+        }
+    }
+    int curlResult = pclose(pipe);
+    
+    // Extract HTTP status code from curl output
+    size_t httpCodePos = result.find("HTTP_CODE:");
+    int httpCode = -1;
+    if (httpCodePos != std::string::npos) {
+        std::string httpCodeStr = result.substr(httpCodePos + 10);
+        httpCode = std::stoi(httpCodeStr);
+    }
+    
+    if (curlResult == 0 && httpCode >= 200 && httpCode < 300) {
+        std::cerr << "SUCCESS: Node registered successfully with HTTP code: " << httpCode << std::endl;
         isReady_ = (nodeData["status"].asString() == "active");
     } else {
+        std::string errorMsg = "Registration failed for URL: " + url;
+        if (httpCode > 0) {
+            errorMsg += " (HTTP " + std::to_string(httpCode) + ")";
+        }
+        if (curlResult != 0) {
+            errorMsg += " (curl exit code: " + std::to_string(curlResult) + ")";
+        }
+        std::cerr << "ERROR: " << errorMsg << std::endl;
+        std::cerr << "Response: " << result << std::endl;
         isReady_ = false;
-        throw std::runtime_error("Failed to register node with central service");
+        throw std::runtime_error(errorMsg);
     }
 }
 

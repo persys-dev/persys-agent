@@ -35,6 +35,8 @@ private:
     Json::Value getHypervisorInfo() const;
     Json::Value getContainerEngineInfo() const;
     Json::Value getDockerSwarmInfo() const;
+    std::string extractHostname(const std::string& url) const;
+    bool isIpAddress(const std::string& hostname) const;
 
     std::string centralUrl_;
     std::string nodeId_;
