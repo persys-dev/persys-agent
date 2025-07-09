@@ -4,6 +4,13 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <set> // Added for std::set
+#include <ctime> // Added for time functions
+#include <map>
+#include <mutex>
+#include <sys/types.h>
+#include <signal.h>
+#include <unistd.h>
 
 DockerController::DockerController() {}
 
@@ -68,6 +75,22 @@ std::string DockerController::stopContainer(const std::string &containerId) {
     return executeDockerCommand("stop " + containerId);
 }
 
+// Add a struct to track state for each workload/container
+struct WorkloadState {
+    std::string status; // e.g., Pulling, ImagePullBackOff, ContainerCreating, Running, Failed
+    std::string reason; // e.g., network error, auth error, etc.
+    time_t lastUpdate;
+};
+
+static std::map<std::string, WorkloadState> workloadStates;
+static std::mutex workloadStatesMutex;
+
+std::map<std::string, time_t> pendingWorkloads; // workloadID -> launch time
+std::mutex pendingWorkloadsMutex;
+
+std::map<pid_t, std::string> runningDockerRuns; // pid -> workloadId
+std::mutex runningDockerRunsMutex;
+
 Json::Value DockerController::listContainers(bool all) {
     // Use --format to get structured output, one line per container
     std::string format = "--format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'";
@@ -75,32 +98,207 @@ Json::Value DockerController::listContainers(bool all) {
     std::string rawOutput = executeDockerCommand(cmd);
 
     Json::Value containers(Json::arrayValue);
-    if (rawOutput.empty()) {
-        return containers;  // Return empty array if no output
+    std::set<std::string> knownNames;
+    if (!rawOutput.empty()) {
+        std::istringstream iss(rawOutput);
+        std::string line;
+        while (std::getline(iss, line)) {
+            if (line.empty()) continue;
+            std::istringstream lineStream(line);
+            std::string id, names, image, status, ports;
+            std::getline(lineStream, id, '\t');
+            std::getline(lineStream, names, '\t');
+            std::getline(lineStream, image, '\t');
+            std::getline(lineStream, status, '\t');
+            std::getline(lineStream, ports, '\t');
+            Json::Value container;
+            container["id"] = id;
+            container["names"] = names;
+            container["image"] = image;
+            container["status"] = status;
+            container["ports"] = ports;
+            // Add reason if tracked
+            {
+                std::lock_guard<std::mutex> lock(workloadStatesMutex);
+                if (workloadStates.count(names)) {
+                    container["reason"] = workloadStates[names].reason;
+                }
+            }
+            containers.append(container);
+            knownNames.insert(names);
+        }
     }
 
-    // Parse the output line by line
-    std::istringstream iss(rawOutput);
-    std::string line;
-    while (std::getline(iss, line)) {
-        if (line.empty()) continue;
+    // --- Pending workloads: check for running docker run processes ---
+    {
+        std::lock_guard<std::mutex> lock(pendingWorkloadsMutex);
+        for (auto it = pendingWorkloads.begin(); it != pendingWorkloads.end(); ) {
+            const std::string& workloadId = it->first;
+            time_t launchTime = it->second;
+            bool found = false;
+            for (const auto& c : containers) {
+                if (c["names"].asString() == workloadId) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                // Check for running docker run process
+                std::string psOutput;
+                std::array<char, 256> buffer;
+                std::string grepCmd = "ps aux | grep 'docker run' | grep -- '" + workloadId + "' | grep -v grep";
+                FILE* pipe = popen(grepCmd.c_str(), "r");
+                if (pipe) {
+                    while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
+                        psOutput += buffer.data();
+                    }
+                    pclose(pipe);
+                }
+                double minutes = difftime(time(nullptr), launchTime) / 60.0;
+                if (!psOutput.empty()) {
+                    Json::Value synthetic;
+                    synthetic["id"] = "";
+                    synthetic["names"] = workloadId;
+                    synthetic["image"] = "";
+                    synthetic["status"] = "Pulling";
+                    synthetic["reason"] = "docker run in progress";
+                    synthetic["sinceMinutes"] = minutes;
+                    synthetic["ports"] = "";
+                    containers.append(synthetic);
+                    std::cout << "[Agent] Workload " << workloadId << " is being pulled/created (" << minutes << " min)" << std::endl;
+                    ++it;
+                } else if (minutes > 35) { // 35 min grace period
+                    std::cout << "[Agent] Workload " << workloadId << " pending for " << minutes << " min, removing from pendingWorkloads" << std::endl;
+                    it = pendingWorkloads.erase(it);
+                } else {
+                    ++it;
+                }
+            } else {
+                // Container is now visible, remove from pending
+                it = pendingWorkloads.erase(it);
+            }
+        }
+    }
 
-        std::istringstream lineStream(line);
-        std::string id, names, image, status, ports;
-        std::getline(lineStream, id, '\t');
-        std::getline(lineStream, names, '\t');
-        std::getline(lineStream, image, '\t');
-        std::getline(lineStream, status, '\t');
-        std::getline(lineStream, ports, '\t');
+    // After collecting containers from docker ps, enhance with docker inspect
+    for (Json::Value& c : containers) {
+        std::string name = c["names"].asString();
+        if (name.empty()) continue;
+        std::string inspectCmd = "inspect " + name + " --format '{{json .State}}'";
+        std::string inspectOut = executeDockerCommand(inspectCmd);
+        if (!inspectOut.empty()) {
+            Json::Value state;
+            Json::CharReaderBuilder builder;
+            std::string errs;
+            std::istringstream s(inspectOut);
+            if (Json::parseFromStream(builder, s, &state, &errs)) {
+                // Use .State fields for more accurate status
+                if (state.isMember("Running") && state["Running"].asBool()) {
+                    c["status"] = "Running";
+                } else if (state.isMember("Paused") && state["Paused"].asBool()) {
+                    c["status"] = "Paused";
+                } else if (state.isMember("Restarting") && state["Restarting"].asBool()) {
+                    c["status"] = "Restarting";
+                } else if (state.isMember("Dead") && state["Dead"].asBool()) {
+                    c["status"] = "Dead";
+                } else if (state.isMember("Status")) {
+                    std::string st = state["Status"].asString();
+                    if (st == "created") {
+                        c["status"] = "ContainerCreating";
+                    } else if (st == "exited") {
+                        c["status"] = "Exited";
+                    } else if (st == "removing") {
+                        c["status"] = "Removing";
+                    } else if (st == "dead") {
+                        c["status"] = "Dead";
+                    } else if (st == "running") {
+                        c["status"] = "Running";
+                    }
+                }
+                if (state.isMember("Error") && !state["Error"].asString().empty()) {
+                    c["status"] = "ImagePullBackOff";
+                    c["reason"] = state["Error"].asString();
+                }
+            }
+        }
+    }
 
-        Json::Value container;
-        container["id"] = id;
-        container["names"] = names;
-        container["image"] = image;
-        container["status"] = status;
-        container["ports"] = ports;
+    // --- Track running docker run processes ---
+    {
+        std::lock_guard<std::mutex> lock(runningDockerRunsMutex);
+        for (auto it = runningDockerRuns.begin(); it != runningDockerRuns.end(); ) {
+            pid_t pid = it->first;
+            const std::string& workloadId = it->second;
+            // Check if process is still running
+            if (kill(pid, 0) == 0) { // process exists
+                // Only add if not already in containers
+                bool found = false;
+                for (const auto& c : containers) {
+                    if (c["names"].asString() == workloadId) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    Json::Value synthetic;
+                    synthetic["id"] = "";
+                    synthetic["names"] = workloadId;
+                    synthetic["image"] = "";
+                    synthetic["status"] = "Pulling";
+                    synthetic["reason"] = "docker run in progress (tracked by PID)";
+                    synthetic["ports"] = "";
+                    containers.append(synthetic);
+                    std::cout << "[Agent] Workload " << workloadId << " is being pulled/created (PID " << pid << ")" << std::endl;
+                }
+                ++it;
+            } else {
+                // Process is gone, remove from map
+                it = runningDockerRuns.erase(it);
+            }
+        }
+    }
 
-        containers.append(container);
+    // Fallback: For any docker run process in ps aux, parse --name and match to a workload
+    std::string psOutput;
+    {
+        std::array<char, 256> buffer;
+        FILE* pipe = popen("ps aux | grep 'docker run' | grep -v grep", "r");
+        if (pipe) {
+            while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
+                psOutput += buffer.data();
+            }
+            pclose(pipe);
+        }
+    }
+    std::istringstream psStream(psOutput);
+    std::string psLine;
+    while (std::getline(psStream, psLine)) {
+        size_t namePos = psLine.find("--name");
+        if (namePos != std::string::npos) {
+            std::istringstream iss(psLine.substr(namePos));
+            std::string dummy, containerName;
+            iss >> dummy >> containerName;
+            if (!containerName.empty()) {
+                bool found = false;
+                for (const auto& c : containers) {
+                    if (c["names"].asString() == containerName) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    Json::Value synthetic;
+                    synthetic["id"] = "";
+                    synthetic["names"] = containerName;
+                    synthetic["image"] = "";
+                    synthetic["status"] = "Pulling";
+                    synthetic["reason"] = "docker run in progress (ps aux fallback)";
+                    synthetic["ports"] = "";
+                    containers.append(synthetic);
+                    std::cout << "[Agent] Container " << containerName << " is being pulled/created (ps aux fallback)" << std::endl;
+                }
+            }
+        }
     }
 
     return containers;

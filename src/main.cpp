@@ -70,7 +70,7 @@ void heartbeatLoop(const std::string& centralUrl, NodeController& nodeCtrl, Syst
         double availableCpu = resources.get("available_cpu", 0.99).asDouble();
         int64_t availableMemory = resources.get("available_memory", 1354).asInt64();
         sendHeartbeat(centralUrl, nodeCtrl.getNodeId(), status, availableCpu, availableMemory);
-        std::this_thread::sleep_for(std::chrono::minutes(5));
+        std::this_thread::sleep_for(std::chrono::minutes(4));
     }
 }
 
