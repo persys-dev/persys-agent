@@ -75,7 +75,7 @@ void heartbeatLoop(const std::string& centralUrl, NodeController& nodeCtrl, Syst
 }
 
 // Registration with retry (unchanged)
-bool registerWithRetry(NodeController& nodeCtrl, int maxRetries = 3, std::chrono::seconds delay = std::chrono::seconds(5)) {
+bool registerWithRetry(NodeController& nodeCtrl, int maxRetries = 3, std::chrono::seconds delay = std::chrono::seconds(30)) {
     for (int attempt = 1; attempt <= maxRetries; ++attempt) {
         try {
             nodeCtrl.registerNode();
