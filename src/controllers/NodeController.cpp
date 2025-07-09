@@ -501,8 +501,8 @@ void NodeController::registerNode() {
         if (dnsResult != 0) {
             std::string errorMsg = "DNS resolution failed for hostname: " + hostname;
             std::cerr << "ERROR: " << errorMsg << std::endl;
-            isReady_ = false;
-            throw std::runtime_error(errorMsg);
+            // isReady_ = false;
+            // throw std::runtime_error(errorMsg);
         }
     } else {
         std::cerr << "Skipping DNS resolution for IP address: " << hostname << std::endl;
@@ -515,8 +515,8 @@ void NodeController::registerNode() {
     if (connectivityResult != 0) {
         std::string errorMsg = "Server not reachable or timeout: " + url;
         std::cerr << "ERROR: " << errorMsg << std::endl;
-        isReady_ = false;
-        throw std::runtime_error(errorMsg);
+        // isReady_ = false;
+        // throw std::runtime_error(errorMsg);
     }
     
     // Attempt the actual registration with detailed error capture
