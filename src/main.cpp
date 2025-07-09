@@ -193,13 +193,6 @@ int main() {
         return collectDockerMetrics(dockerCtrl);
     });
 
-    // Initialize all routes
-    persys::initializeHandshakeRoutes(app, nodeCtrl);
-    persys::initializeDockerRoutes(app, dockerCtrl);
-    persys::initializeComposeRoutes(app, composeCtrl);
-    persys::initializeCronRoutes(app, cronCtrl);
-    persys::initializeSwarmRoutes(app, swarmCtrl);
-
     // Health endpoint
     CROW_ROUTE(app, "/api/v1/health")
     ([&nodeCtrl, &sysCtrl]() {
@@ -214,6 +207,13 @@ int main() {
         Json::StreamWriterBuilder writer;
         return Json::writeString(writer, health);
     });
+
+    // Initialize all routes
+    persys::initializeHandshakeRoutes(app, nodeCtrl);
+    persys::initializeDockerRoutes(app, dockerCtrl);
+    persys::initializeComposeRoutes(app, composeCtrl);
+    persys::initializeCronRoutes(app, cronCtrl);
+    persys::initializeSwarmRoutes(app, swarmCtrl);
 
     CROW_CATCHALL_ROUTE(app)([](crow::response& res) {
         if (res.code == 404) {
