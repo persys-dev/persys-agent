@@ -75,7 +75,7 @@ RUN apt-get update && apt-get install -y \
 # # Install docker-compose (static binary)
 # RUN curl -L https://github.com/docker/compose/releases/download/v2.29.0/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose \
 #     && chmod +x /usr/local/bin/docker-compose
-RUN apt-get install -y curl
+RUN apt-get update && apt-get install -y curl
 
 # Copy compiled binary from builder
 COPY --from=builder /app/build/PersysAgent /usr/local/bin/PersysAgent
